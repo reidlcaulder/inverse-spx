@@ -44,122 +44,90 @@ def get_connection(username: str | None = None):
 # ------------------------- Stage 1: constituents -------------------------
 
 def fetch_sp500_constituents(conn, start: str, end: str, refresh: bool = False) -> pd.DataFrame:
-    """Long-format S&P 500 membership: rows are (date, permno, ticker).
+    """Long-format S&P 500 membership including historical exits.
 
-    Reid's WRDS subscription doesn't include `crsp.dsp500list` or the CCM
-    link table (`crsp_a_ccm.ccmxpf_lnkhist`). Instead we bridge:
-      Compustat idxcst_his (gvkey)
-        → comp.security (gvkey → CUSIP-9; take first 8 chars)
-        → crsp.msenames (CUSIP-8 → permno)
-    Both Compustat and CRSP use identical 8-char issue CUSIPs, so this works
-    cleanly for vanilla US equities (which is everything in S&P 500).
+    Reid's WRDS subscription has a critical limitation: `comp.idxcst_his`
+    on this tier contains ONLY current S&P 500 members (~503 rows, all with
+    null thru-date). Historical exits (Lehman, Sears, SVB, FRC, etc.) are
+    absent. Using it as a membership source produces severe survivorship bias.
+
+    Instead we use the fja05680/sp500 GitHub CSV for point-in-time membership
+    (which includes exits via the -YYYYMM ticker suffix) and map historical
+    tickers to CRSP permnos via crsp.msenames (which handles renames cleanly
+    via the namedt/nameendt validity range).
     """
     cache_path = CACHE_DIR / "wrds_constituents.parquet"
     if cache_path.exists() and not refresh:
         return pd.read_parquet(cache_path)
 
-    # Step 1: S&P 500 gvkey membership from Compustat
-    members = conn.raw_sql(
-        f"""
-        SELECT gvkey, iid, "from"::date AS from_date, "thru"::date AS thru_date
-        FROM comp.idxcst_his
-        WHERE gvkeyx = '{SP500_GVKEYX}'
-          AND ("thru" IS NULL OR "thru" >= '{start}'::date)
-          AND "from" <= '{end}'::date
-        """
-    )
-    members["from_date"] = pd.to_datetime(members["from_date"])
-    members["thru_date"] = pd.to_datetime(members["thru_date"])
-    members["thru_date"] = members["thru_date"].fillna(pd.Timestamp(end))
-    gvkey_list = members["gvkey"].unique().tolist()
-    gvkey_csv = ",".join(f"'{g}'" for g in gvkey_list)
+    # Step 1: point-in-time membership from fja05680 (includes historical exits)
+    from . import constituents as fja
+    history = fja.fetch_constituents_history()  # long-format date, ticker
 
-    # Step 2: (gvkey, iid) → CUSIP-9 from Compustat security table.
-    # comp.security has multiple iid rows per gvkey (one per share class — e.g.
-    # AAPL has iid '01' = AAPL and iid '90C' = AAPL.). idxcst_his also reports
-    # iid, so we match on both.
-    sec = conn.raw_sql(
-        f"""
-        SELECT gvkey, iid, tic, cusip
-        FROM comp.security
-        WHERE gvkey IN ({gvkey_csv})
-          AND cusip IS NOT NULL
-          AND LENGTH(cusip) = 9
-        """
-    )
-    sec["cusip8"] = sec["cusip"].str[:8]
-    # Map (gvkey, iid) → cusip8
-    gvkey_iid_to_cusip8 = {
-        (r["gvkey"], r["iid"]): r["cusip8"] for _, r in sec.iterrows()
-    }
-    # Fallback: also keep gvkey-only mapping for the iid='01' primary class
-    gvkey_to_cusip8 = {}
-    for _, r in sec.iterrows():
-        if r["iid"] == "01":
-            gvkey_to_cusip8[r["gvkey"]] = r["cusip8"]
-    # Last-resort: any cusip for a gvkey
-    for _, r in sec.iterrows():
-        gvkey_to_cusip8.setdefault(r["gvkey"], r["cusip8"])
-
-    cusip8_list = sec["cusip8"].dropna().unique().tolist()
-    cusip8_csv = ",".join(f"'{c}'" for c in cusip8_list)
-
-    # Step 3: CUSIP-8 → permno via CRSP msenames (also gets ticker history)
-    names = conn.raw_sql(
-        f"""
-        SELECT permno, ticker, ncusip,
-               namedt::date AS namedt, nameendt::date AS nameendt
-        FROM crsp.msenames
-        WHERE ncusip IN ({cusip8_csv})
-        """
-    )
-    names["namedt"] = pd.to_datetime(names["namedt"])
-    names["nameendt"] = pd.to_datetime(names["nameendt"])
-    cusip8_to_permnos = names.groupby("ncusip")["permno"].unique().to_dict()
-
-    # Step 4: build (date, permno, ticker) at each quarter-end. Include a
-    # snapshot one quarter BEFORE start so the orchestrator can initialize T0
-    # holdings from the most recent prior membership snapshot.
     start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
     pre_start = (start_ts - pd.offsets.QuarterEnd(1)).normalize()
     quarter_ends = pd.DatetimeIndex(
         [pre_start] + list(pd.date_range(start, end, freq="QE"))
     )
-    rows = []
-    missing_cusip = 0
-    missing_permno = 0
+
+    # Build the union of all tickers ever in S&P 500 in the window
+    all_tickers: set[str] = set()
+    members_at: dict[pd.Timestamp, list[str]] = {}
     for d in quarter_ends:
-        active = members[
-            (members["from_date"] <= d) & (members["thru_date"] >= d)
-        ]
-        for _, m in active.iterrows():
-            # Try (gvkey, iid) match first, fall back to gvkey-only
-            cusip8 = gvkey_iid_to_cusip8.get((m["gvkey"], m["iid"]))
-            if not cusip8:
-                cusip8 = gvkey_to_cusip8.get(m["gvkey"])
-            if not cusip8:
-                missing_cusip += 1
+        members = fja.constituents_at(d, history)
+        members_at[d] = members
+        all_tickers.update(members)
+
+    # Step 2: bulk-pull msenames history for everything (one query)
+    # Match by ticker (msenames.ticker) AND date validity (namedt/nameendt).
+    tickers_csv = ",".join(f"'{t}'" for t in sorted(all_tickers))
+    names = conn.raw_sql(
+        f"""
+        SELECT permno, ticker, ncusip,
+               namedt::date AS namedt, nameendt::date AS nameendt,
+               shrcd, exchcd
+        FROM crsp.msenames
+        WHERE ticker IN ({tickers_csv})
+          AND shrcd IN (10, 11)  -- common stock only
+          AND exchcd IN (1, 2, 3)  -- NYSE, AMEX, Nasdaq
+        """
+    )
+    names["namedt"] = pd.to_datetime(names["namedt"])
+    names["nameendt"] = pd.to_datetime(names["nameendt"])
+
+    # Step 3: pre-build per-ticker validity ranges for O(R) lookup per date,
+    # where R is the small number of name records for that ticker (usually 1-3).
+    ticker_to_ranges: dict[str, list[tuple[pd.Timestamp, pd.Timestamp, int]]] = {}
+    for _, row in names.iterrows():
+        ticker_to_ranges.setdefault(row["ticker"], []).append(
+            (row["namedt"], row["nameendt"], int(row["permno"]))
+        )
+    # Sort each ticker's ranges by start date, descending (most recent first)
+    for t in ticker_to_ranges:
+        ticker_to_ranges[t].sort(key=lambda r: r[0], reverse=True)
+
+    rows = []
+    missing_count = 0
+    for d in quarter_ends:
+        for ticker in members_at[d]:
+            ranges = ticker_to_ranges.get(ticker, [])
+            permno: int | None = None
+            for namedt, nameendt, p in ranges:
+                if namedt <= d <= nameendt:
+                    permno = p
+                    break
+            if permno is None:
+                missing_count += 1
                 continue
-            permnos = cusip8_to_permnos.get(cusip8, [])
-            if len(permnos) == 0:
-                missing_permno += 1
-                continue
-            permno = int(permnos[0])
-            tkr_rows = names[
-                (names["permno"] == permno)
-                & (names["namedt"] <= d)
-                & (names["nameendt"] >= d)
-            ]
-            ticker = tkr_rows.iloc[0]["ticker"] if not tkr_rows.empty else ""
             rows.append({
                 "date": d.normalize(),
                 "permno": permno,
-                "gvkey": m["gvkey"],
                 "ticker": ticker,
             })
-    if missing_cusip or missing_permno:
-        print(f"  [constituents] missing CUSIP for {missing_cusip} gvkey-rebal pairs, "
-              f"missing permno for {missing_permno} cusip8-rebal pairs")
+
+    if missing_count:
+        print(f"  [constituents] {missing_count} ticker-rebal pairs failed to map to a permno")
 
     df = pd.DataFrame(rows)
     cache_path.parent.mkdir(parents=True, exist_ok=True)

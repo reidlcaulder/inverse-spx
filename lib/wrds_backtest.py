@@ -16,35 +16,62 @@ def apply_delisting_returns(
 ) -> pd.DataFrame:
     """Augment daily['ret'] with delisting returns on dlstdt.
 
-    For each permno that delists in the window, replace the `ret` on the
-    delisting date with `dlret` (which is the cumulative return from last
-    trade to actual delisting — e.g., -1.0 for bankruptcy, takeover-cash/last-px
-    for cash acquisitions).
+    For each permno that delists, compound `dlret` into the LAST available
+    trading-day return for that permno on or before `dlstdt`.
 
-    If the delisting date is not in the daily DataFrame (because the stock
-    stopped trading earlier), the delisting return is applied on the LAST
-    available trading date for that permno.
+    Vectorized for ~5M-row daily frames: pre-computes per-permno last-date
+    on or before each delisting date in one groupby pass rather than O(N)
+    filtering per delisting.
     """
-    out = daily.copy()
-    for _, row in delistings.iterrows():
+    # Filter to delistings with a usable dlret
+    dl = delistings.copy()
+    dl = dl[dl["dlret"].notna()]
+    if dl.empty:
+        return daily
+
+    # For each permno, pre-compute its set of trading dates as a sorted Series
+    out = daily.copy().reset_index(drop=True)
+    # Multi-index lookup is O(log n); set once
+    indexed = out.set_index(["permno", "date"])["ret"]
+
+    # Group daily by permno once to find available trading dates per permno
+    permno_to_dates: dict = {}
+    for permno, g in out.groupby("permno"):
+        permno_to_dates[permno] = g["date"].sort_values().values  # numpy datetime64
+
+    import numpy as np
+
+    updates = []  # list of (permno, last_date, new_ret) tuples
+    for _, row in dl.iterrows():
         permno = row["permno"]
-        dlstdt = row["dlstdt"]
-        dlret = row["dlret"]
-        if dlret is None or pd.isna(dlret):
+        dlstdt = pd.Timestamp(row["dlstdt"]).to_datetime64()
+        dlret = float(row["dlret"])
+        dates = permno_to_dates.get(permno)
+        if dates is None or len(dates) == 0:
             continue
-        # Find the last available trading date for this permno on or before dlstdt
-        permno_dates = out.loc[out["permno"] == permno, "date"]
-        if permno_dates.empty:
+        # Last available date on or before dlstdt — binary search
+        idx = np.searchsorted(dates, dlstdt, side="right") - 1
+        if idx < 0:
+            # Whole permno series is after dlstdt — fall back to first available
+            last_date = dates[0]
+        else:
+            last_date = dates[idx]
+        try:
+            existing = indexed.loc[(permno, pd.Timestamp(last_date))]
+        except KeyError:
             continue
-        last_date = permno_dates[permno_dates <= dlstdt].max()
-        if pd.isna(last_date):
-            last_date = permno_dates.max()
-        # Compound the delisting return into that day's total return
-        mask = (out["permno"] == permno) & (out["date"] == last_date)
-        if mask.any():
-            existing_ret = out.loc[mask, "ret"].values[0]
-            existing_ret = 0.0 if pd.isna(existing_ret) else existing_ret
-            out.loc[mask, "ret"] = (1 + existing_ret) * (1 + dlret) - 1
+        if pd.isna(existing):
+            existing = 0.0
+        new_ret = (1 + existing) * (1 + dlret) - 1
+        updates.append((permno, pd.Timestamp(last_date), new_ret))
+
+    if not updates:
+        return daily
+
+    upd_df = pd.DataFrame(updates, columns=["permno", "date", "_new_ret"])
+    out = out.merge(upd_df, on=["permno", "date"], how="left")
+    out["ret"] = out["_new_ret"].combine_first(out["ret"])
+    out = out.drop(columns=["_new_ret"])
     return out
 
 
@@ -66,8 +93,17 @@ def compute_inverse_weights(
     rebal_date: pd.Timestamp,
     constituent_permnos: list[int],
     failures_log: list[dict] | None = None,
+    mc_floor: float = 100_000_000.0,
 ) -> dict[int, float]:
     """Pure 1/MC weighting at rebal_date for the given S&P 500 constituents.
+
+    `mc_floor` (default $100M) drops names with computed market cap below that
+    threshold — these are typically data-quality artifacts (stale CRSP
+    shares-outstanding for delisted small-caps that crashed before their last
+    trade), not real S&P 500 constituents. Without this floor, the inverse
+    weighting blows up: a phantom $5M MC permno gets ~50% weight in a 1/MC scheme.
+
+    Set mc_floor=0 to disable.
 
     Returns dict {permno: weight} summing to 1.0 across kept names.
     """
@@ -75,6 +111,15 @@ def compute_inverse_weights(
         (daily["date"] == rebal_date) & daily["permno"].isin(constituent_permnos)
     ].copy()
     rebal_data = rebal_data[(rebal_data["mc"] > 0) & rebal_data["mc"].notna()]
+    if mc_floor > 0:
+        below_floor = rebal_data[rebal_data["mc"] < mc_floor]
+        if failures_log is not None and not below_floor.empty:
+            for _, r in below_floor.iterrows():
+                failures_log.append({
+                    "date": rebal_date, "permno": int(r["permno"]),
+                    "reason": f"mc_below_floor_{int(mc_floor):d}"
+                })
+        rebal_data = rebal_data[rebal_data["mc"] >= mc_floor]
     if rebal_data.empty:
         return {}
 

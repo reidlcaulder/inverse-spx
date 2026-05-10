@@ -106,17 +106,23 @@ def main() -> int:
     failures: list[dict] = []
     weights_per_rebal: dict[pd.Timestamp, dict[int, float]] = {}
 
+    all_snapshot_dates = sorted(constituents["date"].unique())
     for d in rebal_dates:
-        # Find the Compustat-sanctioned membership at this date
-        # (constituents was built at quarter-ends; find nearest snapshot ≤ d)
-        snapshot_dates = sorted(constituents["date"].unique())
-        snapshot_dates = [sd for sd in snapshot_dates if sd <= d]
-        if not snapshot_dates:
-            members_at_d = []
+        # Find the membership snapshot for this date — most recent ≤ d, or
+        # if d is before the first snapshot, use the earliest available.
+        on_or_before = [sd for sd in all_snapshot_dates if sd <= d]
+        if on_or_before:
+            target_date = on_or_before[-1]
+        elif all_snapshot_dates:
+            target_date = all_snapshot_dates[0]
         else:
-            members_at_d = constituents[
-                constituents["date"] == snapshot_dates[-1]
-            ]["permno"].tolist()
+            members_at_d = []
+            w = bt.compute_inverse_weights(daily, d, members_at_d, failures)
+            weights_per_rebal[d] = w
+            continue
+        members_at_d = constituents[
+            constituents["date"] == target_date
+        ]["permno"].tolist()
 
         w = bt.compute_inverse_weights(daily, d, members_at_d, failures)
         weights_per_rebal[d] = w
@@ -148,21 +154,35 @@ def main() -> int:
     _log(f"  SPY end value: {spy_daily['cumulative_value'].iloc[-1]:.4f}")
 
     # ---- 11. Translate weights to a DataFrame shape the existing report expects ----
+    # Build O(1) lookups so this scales to long backtests (200+ rebal dates).
+    _log("Translating weights to per-rebal DataFrames...")
+    daily_by_dp = daily.set_index(["date", "permno"])
+    # Latest ticker per permno on or before a given date — cache the
+    # constituents-by-permno frame sorted descending by date once
+    cons_sorted = constituents.sort_values("date", ascending=False)
+    permno_to_ticker_history: dict[int, pd.DataFrame] = {
+        p: g for p, g in cons_sorted.groupby("permno")
+    }
+
+    def _ticker_at(permno: int, asof: pd.Timestamp) -> str:
+        h = permno_to_ticker_history.get(permno)
+        if h is None or h.empty:
+            return str(permno)
+        match = h[h["date"] <= asof]
+        if match.empty:
+            return str(permno)
+        return match.iloc[0]["ticker"] or str(permno)
+
     weights_df_per_rebal: dict[pd.Timestamp, pd.DataFrame] = {}
     for d, w in weights_per_rebal.items():
-        # Pull MC, price, ticker for each permno
         rows = []
         for permno, weight in w.items():
-            row = daily[(daily["date"] == d) & (daily["permno"] == permno)]
-            if row.empty:
+            try:
+                r = daily_by_dp.loc[(d, permno)]
+            except KeyError:
                 continue
-            r = row.iloc[0]
-            tk = constituents[
-                (constituents["date"] <= d) & (constituents["permno"] == permno)
-            ]
-            ticker = tk.sort_values("date").iloc[-1]["ticker"] if not tk.empty else str(permno)
             rows.append({
-                "ticker": ticker or str(permno),
+                "ticker": _ticker_at(permno, d),
                 "shares": r["shares"],
                 "price": r["price"],
                 "mc": r["mc"],

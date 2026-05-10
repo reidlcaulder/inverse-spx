@@ -8,14 +8,15 @@ Backtest of an **inverse-weighted S&P 500** index, 2015 onward. Where the actual
 
 User-facing description: see [README.md](README.md). Don't duplicate it here.
 
-## Two data paths, both supported
+## Three runs, one stitched output
 
-| Path | Cost | Window | Quality | When to use |
-|---|---|---|---|---|
-| **WRDS / CRSP** | needs WRDS subscription | through last CRSP cut (currently 2024-12-31) | gold standard | when accuracy matters |
-| EDGAR / yfinance | free | 2015–present | good cumulative returns, distorted concentration profile | when WRDS is unavailable or when you need 2025 data |
+| Run | Source | Window | Output |
+|---|---|---|---|
+| **Stitched** (primary) | WRDS + EDGAR | 1996-2025 | `out_full/REPORT.md` |
+| WRDS / CRSP | Compustat + CRSP | 1996-2024 | `out_wrds/REPORT.md` |
+| EDGAR / yfinance | SEC EDGAR + yfinance | 2015-2025 | `out/REPORT.md` |
 
-The IVV-filing diagnostic in `lib/etf_weights.py` confirmed WRDS weights are accurate and EDGAR weights are off for some multi-class issuers. Cumulative returns agree within ~4 pp over 10 years.
+The stitched run uses WRDS daily total returns through 2024-12-31 (the latest CRSP cut on Reid's subscription) and appends EDGAR/yfinance daily returns from 2025-01-02 onward. The EDGAR data path was validated against actual iShares IVV regulatory filings (`lib/etf_weights.py`) — its cumulative returns track WRDS within ~1 pp/year, though its concentration profile is distorted by per-class XBRL share counts on multi-class issuers.
 
 ## Running
 
@@ -50,15 +51,19 @@ The orchestrators ([inverse_spx_backtest.py](inverse_spx_backtest.py) and [inver
 
 ### WRDS / CRSP path
 
-1. **Constituents** ([lib/wrds_data.py](lib/wrds_data.py) `fetch_sp500_constituents`) — Compustat `idxcst_his` for S&P 500 gvkeys (gvkeyx = `'000003'`), then bridges to CRSP permno via CUSIP-8 because Reid's subscription doesn't include the CCM linkage table. Path: `gvkey` → `comp.security.cusip[:8]` → `crsp.msenames.ncusip` → `permno`.
-2. **Daily data** ([lib/wrds_data.py](lib/wrds_data.py) `fetch_daily_data`) — single CRSP `dsf` query for prices, shares, total returns. Stores as long-format parquet.
-3. **Delistings** (`fetch_delistings`) — CRSP `dsedelist` events with `dlret`. Many entries have null `dlret` because CRSP populates it inconsistently across delisting types.
-4. **Weights** ([lib/wrds_backtest.py](lib/wrds_backtest.py) `compute_inverse_weights`) — same 1/MC math, computed from CRSP's already-correct prices and shares.
+1. **Constituents** ([lib/wrds_data.py](lib/wrds_data.py) `fetch_sp500_constituents`) — uses fja05680/sp500 GitHub CSV (point-in-time including historical exits) and maps each historical ticker to a permno via `crsp.msenames` matched on (ticker, namedt..nameendt). **Important:** we do NOT use `comp.idxcst_his` because on Reid's subscription it contains only current S&P 500 members (~503 rows, all with null thru-date) — using it would cause severe survivorship bias.
+2. **Daily data** ([lib/wrds_data.py](lib/wrds_data.py) `fetch_daily_data`) — single CRSP `dsf` query for prices, shares, total returns. Stores as long-format parquet (~5M rows for 1996-2024).
+3. **Delistings** (`fetch_delistings`) — CRSP `dsedelist` events with `dlret`. Some entries have null `dlret` because CRSP populates it inconsistently across delisting types. Applied in `apply_delisting_returns` (vectorized via per-permno date arrays + binary search).
+4. **Weights** ([lib/wrds_backtest.py](lib/wrds_backtest.py) `compute_inverse_weights`) — pure 1/MC, with a $100M minimum market-cap floor as a sanity guard against pre-2008 phantom data (stale CRSP shares-outstanding for delisted small-caps that produced impossible <$10M MCs and would otherwise have received 30-50% inverse weight). The floor drops 3-5 names per quarter, almost all pre-2008. Set `mc_floor=0` to disable.
 5. **Simulate** ([lib/wrds_backtest.py](lib/wrds_backtest.py) `run_backtest_returns`) — returns-based simulator using CRSP's `ret` field directly (no need to reconstruct returns from prices). Reuses `lib/report.py` for output.
 
 ### Diagnostic / cross-check
 
 [lib/etf_weights.py](lib/etf_weights.py) parses iShares Core S&P 500 (IVV) holdings out of N-Q regulatory filings on SEC EDGAR. Used as ground truth for validating the EDGAR vs WRDS concentration profiles. Not part of the production backtest.
+
+### Stitched run
+
+[inverse_spx_backtest_full.py](inverse_spx_backtest_full.py) loads `out_wrds/daily_returns.csv` and `out/daily_returns.csv`, concatenates WRDS through 2024-12-31 with EDGAR daily returns from 2025-01-02 onward, and writes `out_full/REPORT.md` covering the full window. No new data fetching — just a re-aggregation of the two source runs.
 
 ## Critical invariants (don't break these)
 

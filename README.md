@@ -4,24 +4,32 @@ Backtest of an **inverse-weighted S&P 500** index — the same constituents as t
 
 The strategy is the literal mathematical opposite of cap-weighting: where SPX uses `w_i = MC_i / Σ MC_j`, this index uses `w_i = (1/MC_i) / Σ(1/MC_j)`, no per-name cap. The point is to surface what a cap-weighted index downplays — small caps get amplified, mega caps essentially disappear.
 
-## Headline result (10-year window)
+## Headline result (1996 – 2025, 30 years)
 
-Two independent backtests, both pointing the same direction:
+Stitched run combining WRDS/CRSP for 1996-2024 with EDGAR/yfinance for 2025:
 
-| Run | Window | Inverse-SPX | SPY | Spread |
-|---|---|---:|---:|---:|
-| **WRDS / CRSP** (gold standard) | 2015 – 2024 | +339% (CAGR 16.0%) | +240% (CAGR 13.0%) | +99 pts |
-| EDGAR / yfinance (free) | 2015 – 2025 | +368% (CAGR 15.1%) | +303% (CAGR 13.5%) | +66 pts |
+| Metric | **Inverse-SPX** | SPY | Spread |
+|---|---:|---:|---:|
+| Total return (30y) | **+6,438%** | +1,783% | +4,655 pts |
+| CAGR | **+14.96%** | +10.28% | +4.67 pts |
+| Annualized volatility | 21.93% | 19.28% | +2.66 pts |
+| **Sharpe (rf=0)** | **0.75** | 0.60 | +0.14 |
+| Max drawdown | -58.49% | -55.20% | -3.29 pts |
 
-Sharpe is comparable (~0.85 vs 0.80) — the inverse strategy beat SPY in cumulative return with similar risk-adjusted performance. The gap is concentrated in 2015-2017 (small-cap rally) and 2022 (mega-cap drawdown). It gave back ground in 2023-2024 during the Mag-7 surge.
+Inverse-weighted S&P 500 beat the cap-weighted index by ~4.7 percentage points per year over 30 years, with similar volatility and a slightly worse drawdown — leading to a meaningfully higher Sharpe ratio. The gap accumulated in three distinct regimes: 2000-2003 dot-com bust (small caps held up while mega-caps crashed), 2003-2007 small-cap rally, and 2009-2014 post-crisis recovery. The strategy lagged in 2017 and 2023-2025 (Mag-7 dominance).
 
 Full reports:
-- [out_wrds/REPORT.md](out_wrds/REPORT.md) — primary, CRSP-backed
-- [out/REPORT.md](out/REPORT.md) — free-data baseline
+- **[out_full/REPORT.md](out_full/REPORT.md)** — primary, 30-year stitched
+- [out_wrds/REPORT.md](out_wrds/REPORT.md) — WRDS-only, 1996-2024
+- [out/REPORT.md](out/REPORT.md) — EDGAR-only, 2015-2025
 
-## Why two runs?
+## Why three runs?
 
-The free data path (SEC EDGAR shares-outstanding × yfinance prices) produced clean cumulative returns but distorted *concentration profiles* — a few multi-class issuers had bad XBRL share counts that gave them implausible 10%+ inverse weights. CRSP via WRDS gives the right shape (top weight ~1-2%, bottom-decile share ~30%), and an iShares IVV regulatory-filing diagnostic confirmed the WRDS numbers are accurate. The EDGAR run is kept as a free alternative for anyone without WRDS — the cumulative return story holds, just don't trust the concentration table beyond the directional read.
+- **`out_full/`** is the primary deliverable: 30-year stitched (WRDS for 1996-2024, EDGAR for 2025).
+- **`out_wrds/`** is the source for the historical bulk. WRDS/CRSP provides clean point-in-time prices and total returns including delisted names.
+- **`out/`** is a free-data baseline. SEC EDGAR shares-outstanding × yfinance prices, full 2015-2025 window. Useful when WRDS isn't available, but its concentration profile is distorted by per-class XBRL share counts on multi-class issuers (an iShares IVV regulatory-filing diagnostic in `lib/etf_weights.py` confirmed this). Cumulative-return divergence from WRDS over 2015-2024 is small (<1 pp/year), so the EDGAR run is also what we use for the 2025 tail in the stitched run.
+
+Membership for both WRDS and EDGAR comes from the [fja05680/sp500](https://github.com/fja05680/sp500) GitHub CSV — point-in-time including historical exits. This was important because Reid's WRDS subscription's `comp.idxcst_his` table contains only current S&P 500 members; using it as a membership source would have produced severe survivorship bias.
 
 ## Setup
 
@@ -36,6 +44,17 @@ cp .env.example .env
 `SEC_EDGAR_USER_AGENT_EMAIL` is required even for the free-data run — SEC's fair-access policy requires a real contact email in the User-Agent header.
 
 ## Run
+
+### Full stitched backtest (primary, 30 years)
+
+Requires both WRDS and EDGAR runs to have completed first.
+
+```bash
+python inverse_spx_backtest_wrds.py --start 1996-01-01 --end 2024-12-31
+python inverse_spx_backtest.py     --start 2015-01-01 --end 2025-12-31
+python inverse_spx_backtest_full.py
+# output: out_full/REPORT.md
+```
 
 ### EDGAR / yfinance (free, ~25-40 min cold cache)
 
@@ -69,10 +88,8 @@ python verify.py
 
 ## Methodology
 
-- **Universe** — S&P 500 constituents at each quarter-end, point-in-time
-  - EDGAR run: [fja05680/sp500](https://github.com/fja05680/sp500) community CSV
-  - WRDS run: Compustat `idxcst_his` (gvkey-based), bridged to CRSP permno via CUSIP-8 (Reid's subscription doesn't include the CCM linkage table, so a CUSIP bridge is used)
-- **Weighting** — pure 1/MC, normalized to sum to 1, no per-name cap
+- **Universe** — S&P 500 constituents at each quarter-end, point-in-time, from the [fja05680/sp500](https://github.com/fja05680/sp500) community CSV (the only practical free source that includes historical exits with their leave-month suffix). Earliest snapshot: 1996-01-02. The WRDS path maps these tickers to CRSP permnos via `crsp.msenames` matched on (ticker, namedt..nameendt) ranges.
+- **Weighting** — pure 1/MC, normalized to sum to 1, no per-name cap. The WRDS path applies a $100M minimum market-cap floor at each rebalance to filter out a small number of pre-2008 phantom-data permnos (where stale CRSP shares-outstanding for delisted small-caps produced impossible <$10M MCs that would otherwise have received 30-50% inverse weight). The floor drops 3-5 names per quarter, almost all pre-2008.
 - **Rebalance** — last trading day of each calendar quarter; weights set at close, applied next day forward (no look-ahead)
 - **Returns** — total return: `auto_adjust=True` for yfinance / `ret` field for CRSP (both fold dividends into the price series)
 - **Mid-quarter delisting** — EDGAR run carries forward last close until next rebalance drops the position. WRDS run additionally applies CRSP `dlret` on the delisting date when populated.
@@ -101,8 +118,10 @@ inverse-spx/
 ├── data/
 │   ├── cache/                      # gitignored — parquet/JSON caches
 │   └── manual_overrides/           # CSV fallbacks for SEC data gaps
-├── out/                            # EDGAR/yfinance run outputs (REPORT.md + CSVs)
-└── out_wrds/                       # WRDS/CRSP run outputs
+├── inverse_spx_backtest_full.py    # Stitch WRDS + EDGAR into single 1996-present series
+├── out/                            # EDGAR/yfinance 2015-2025
+├── out_wrds/                       # WRDS/CRSP 1996-2024
+└── out_full/                       # Stitched 1996-2025 (primary deliverable)
 ```
 
 ## Known limitations
