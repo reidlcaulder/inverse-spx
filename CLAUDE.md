@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-Backtest of an **inverse-weighted S&P 500** index, 2015 onward. Where the actual index uses `w_i = MC_i / ΣMC`, this one uses `w_i = (1/MC_i) / Σ(1/MC_j)`, no per-name cap. Quarterly rebalanced, total return, vs SPY benchmark. Output is markdown reports + CSVs in `out/` (EDGAR run) and `out_wrds/` (WRDS run).
+Backtest of an **inverse-weighted S&P 500** index, 1996-2025. Where the actual index uses `w_i = MC_i / ΣMC`, this one uses `w_i = (1/MC_i) / Σ(1/MC_j)`, no per-name cap. Quarterly rebalanced, total return, vs SPY benchmark. Output is markdown reports + CSVs in `out/` (EDGAR), `out_wrds/` (WRDS), `out_full/` (stitched primary).
 
 User-facing description: see [README.md](README.md). Don't duplicate it here.
 
@@ -29,10 +29,13 @@ pip install -e .[wrds]            # add wrds package for the WRDS path
 
 python verify.py                                                          # smoke test
 python inverse_spx_backtest.py --start 2015-01-01 --end 2025-12-31         # EDGAR run
-python inverse_spx_backtest_wrds.py --start 2015-01-01 --end 2025-12-31    # WRDS run
+python inverse_spx_backtest_wrds.py --start 1996-01-01 --end 2024-12-31    # WRDS run
+python inverse_spx_backtest_full.py                                        # stitch the two
+python tools/plot_cumulative.py                                            # render docs/cumulative*.png
+python tools/compare_alternatives.py                                       # render docs/comparison.png + stats
 ```
 
-Cold cache: 25-40 min for EDGAR (rate-limited by SEC and yfinance), ~5-10 min for WRDS (a few SQL queries). Warm cache: 1-2 min for either.
+Cold cache: 25-40 min for EDGAR (rate-limited by SEC and yfinance), ~5-10 min for WRDS (a few SQL queries). Warm cache: 1-2 min for either. Stitch + chart tools are seconds.
 
 `verify.py` is the fastest way to confirm the data layer works after editing — runs single-ticker fetches end-to-end against AAPL.
 
@@ -68,7 +71,7 @@ The orchestrators ([inverse_spx_backtest.py](inverse_spx_backtest.py) and [inver
 ## Critical invariants (don't break these)
 
 - **No look-ahead in either simulator.** At rebalance day `d`, holdings are set using *close* prices on `d`. The first daily return contribution from new holdings is on `d+1`. See [lib/backtest.py](lib/backtest.py) `run_backtest()` and [lib/wrds_backtest.py](lib/wrds_backtest.py) `run_backtest_returns()`.
-- **The "T0" rebalance.** Both orchestrators prepend the first trading day of the window to the rebal list so the portfolio is initialized on day 0 from `weights_per_rebal[t0]`. There are 45 rebalance dates total (1 T0 + 44 quarter-ends) for a 2015-2025 EDGAR window.
+- **The "T0" rebalance.** Both orchestrators prepend the first trading day of the window to the rebal list so the portfolio is initialized on day 0 from `weights_per_rebal[t0]`. The WRDS orchestrator also falls back to the earliest fja05680 snapshot if T0 predates the first available membership snapshot (relevant for backtests starting before 1996-01-02).
 - **Ticker alias remap order (EDGAR path).** `constituents_at()` returns historical symbols (e.g. `FB` in 2015). The orchestrator passes them through `ticker_aliases.remap()` (e.g. `FB → META`) *before* SEC and yfinance lookups. Aliases that return `None` (acquired with no successor) are dropped from the universe. Adding new renames goes in [lib/ticker_aliases.py](lib/ticker_aliases.py).
 - **Delisted tickers carry a `-YYYYMM` suffix in fja05680.** [constituents.py](lib/constituents.py) `_strip_delisted_suffix()` strips it before returning. Don't bypass.
 - **Manual override CSV is the ground truth for shares.** When `data/manual_overrides/shares_outstanding.csv` has an entry for `(date, ticker)`, [weights.py](lib/weights.py) uses it instead of SEC. Use this for known holdouts where SEC EDGAR is missing or wrong.
@@ -111,6 +114,21 @@ These are real, not theoretical. They're disclaimed in each report's "Limitation
 - **Total CSO, not float-adjusted.** S&P 500 itself uses free-float MC; we use total shares-outstanding. Slight overstatement for names with concentrated insider holdings.
 - **fja05680 is community-maintained**, not S&P-licensed. Spot-check known additions/deletions if precision matters.
 - **CRSP's `dlret` is sparsely populated.** Many delistings (cash takeouts, some bankruptcies) have null `dlret`. We could improve by inferring from `dlamt`/`dlprc`/`dlretx` — currently we don't.
+
+## Reporting tools (under `tools/`)
+
+- [tools/plot_cumulative.py](tools/plot_cumulative.py) — generates `docs/cumulative.png` and `docs/cumulative_log.png` from `out_full/cumulative.csv`. Re-run any time the stitched output changes.
+- [tools/compare_alternatives.py](tools/compare_alternatives.py) — pulls SPY, RSP, IJR, IWM, AVUV via yfinance and renders `docs/comparison.png` + `docs/comparison_stats.md` showing inverse-SPX vs each over its overlap window. Each line is normalized to start at $1 on its first available date; stats in the table are computed over each fund's overlap with the inverse-SPX series.
+
+## Pushing the start date earlier than 1996
+
+The current 1996 start is bounded by [fja05680/sp500](https://github.com/fja05680/sp500) — its earliest snapshot is 1996-01-02. WRDS's `crsp.dsp500list` (which goes to 1925) and `comp.idxcst_his`'s historical exits are gated on Reid's subscription. Three options if anyone wants to extend:
+
+1. Upgrade the WRDS subscription to include `crsp_a_indexes` schema, or buy Norgate Data / Sharadar
+2. Build a "synthetic S&P 500" — top 500 US common stocks by market cap at each quarter-end, computed from CRSP `dsf` directly. Goes back to 1925, but isn't the actual S&P 500
+3. Reconstruct from Wikipedia + Vanguard's pre-1996 N-CSR filings on EDGAR. Multi-day research project; thin pre-1980
+
+None implemented. See README "Why does the backtest start in 1996?" for the user-facing version.
 
 ## When extending
 

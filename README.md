@@ -1,6 +1,6 @@
 # inverse-spx
 
-Backtest of an **inverse-weighted S&P 500** index — the same constituents as the real S&P 500, but with weights inversely proportional to market cap (so the smallest holding gets the largest weight). Quarterly rebalanced, total return, vs SPY benchmark, 2015-2025.
+Backtest of an **inverse-weighted S&P 500** index — the same constituents as the real S&P 500, but with weights inversely proportional to market cap (so the smallest holding gets the largest weight). Quarterly rebalanced, total return, vs SPY benchmark, 1996-2025.
 
 The strategy is the literal mathematical opposite of cap-weighting: where SPX uses `w_i = MC_i / Σ MC_j`, this index uses `w_i = (1/MC_i) / Σ(1/MC_j)`, no per-name cap. The point is to surface what a cap-weighted index downplays — small caps get amplified, mega caps essentially disappear.
 
@@ -157,13 +157,23 @@ inverse-spx/
 └── out_full/                       # Stitched 1996-2025 (primary deliverable)
 ```
 
+## Why does the backtest start in 1996?
+
+That's the earliest date in the only practical free source for point-in-time S&P 500 membership ([fja05680/sp500](https://github.com/fja05680/sp500)). Going further back would require one of:
+
+- **Paying for it** — Norgate Data (~$650/year), Sharadar (~$200/year tier), or a WRDS-tier upgrade that includes `crsp_a_indexes` (the `dsp500list` table goes to 1925)
+- **A "synthetic" S&P 500** — top 500 US common stocks by market cap at each quarter-end, computed directly from CRSP. Goes back to 1925, but isn't the actual S&P 500 (S&P uses qualitative criteria beyond market cap). Methodologically defensible if labeled accurately
+- **Reconstructing from Wikipedia + EDGAR** — walk Wikipedia's "Selected changes" page backward from a 1996 anchor, cross-referenced with Vanguard's pre-1996 N-CSR filings on EDGAR. Multi-day research project; coverage gets thin pre-1980
+
+None of these are implemented here — 1996 was the practical stopping point for free, methodologically-clean data.
+
 ## Known limitations
 
 The full caveats live in each run's REPORT.md. Highlights:
 
 1. **Survivorship bias on the EDGAR run** — yfinance has spotty history for delisted small-caps; we drop them, biasing returns upward. Inverse weighting amplifies this (the smallest names get the largest weights, and the smallest names are most likely to delist). The WRDS run mostly fixes this since CRSP retains delisted history. ~14% of ticker-rebalance pairs were dropped in EDGAR vs ~0.5% in WRDS.
 2. **CRSP doesn't have 2025 yet** — typical institutional subscription cadence. The WRDS run ends 2024-12-31; for 2025 use the EDGAR run.
-3. **WRDS without CCM** — Reid's WRDS subscription doesn't include the CCM (CRSP↔Compustat) linkage table, so the WRDS run bridges via CUSIP-8 (`comp.security.cusip[:8]` → `crsp.msenames.ncusip`). Coverage is good (~491 unique permnos found) but imperfect; a few delisted small-caps may be missing.
+3. **WRDS without CCM or membership tables** — Reid's WRDS subscription doesn't include the CCM (CRSP↔Compustat) linkage table or `crsp_a_indexes` (which contains S&P 500 membership and index-level data). Membership therefore comes from fja05680, and tickers are mapped to CRSP permnos via `crsp.msenames`. Coverage is 1,081 unique permnos across the 1996-2024 window (~7,770 ticker-rebalance pairs failed to map and were dropped — mostly old delisted names with renames or class-share quirks).
 4. **Multi-class share quirks** — EDGAR's `dei:EntityCommonStockSharesOutstanding` reports per-class for dual-class issuers (GOOGL/GOOG, BRK.A/BRK.B). The fallback chain in `lib/shares.py` handles most cases but is the most likely source of any remaining EDGAR weight oddities.
 5. **No transaction costs in headline numbers** — both runs include a separate slippage-adjusted scenario (25 bps round-trip on rebalanced fraction) for honesty. Quarterly rebalancing of a small-cap-tilted book is not free in reality.
 6. **No taxes** — gross returns. Quarterly rebalancing in a taxable account would generate substantial short-term capital gains.
