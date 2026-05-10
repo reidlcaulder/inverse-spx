@@ -6,6 +6,8 @@ The strategy is the literal mathematical opposite of cap-weighting: where SPX us
 
 ## Headline result (1996 – 2025, 30 years)
 
+![Cumulative growth of $1, log scale](docs/cumulative_log.png)
+
 Stitched run combining WRDS/CRSP for 1996-2024 with EDGAR/yfinance for 2025:
 
 | Metric | **Inverse-SPX** | SPY | Spread |
@@ -22,6 +24,8 @@ Full reports:
 - **[out_full/REPORT.md](out_full/REPORT.md)** — primary, 30-year stitched
 - [out_wrds/REPORT.md](out_wrds/REPORT.md) — WRDS-only, 1996-2024
 - [out/REPORT.md](out/REPORT.md) — EDGAR-only, 2015-2025
+
+Linear-scale version of the same chart: [docs/cumulative.png](docs/cumulative.png) (the divergence is dramatic; log scale is more readable).
 
 ## Why three runs?
 
