@@ -27,6 +27,35 @@ Full reports:
 
 Linear-scale version of the same chart: [docs/cumulative.png](docs/cumulative.png) (the divergence is dramatic; log scale is more readable).
 
+## How does this compare to small-cap funds you can actually buy?
+
+Since a pure 1/MC over the S&P 500 is mostly a small-cap tilt, a fair question is how it stacks up against the small-cap and equal-weight ETFs that already exist. Each row below is computed over the inverse-SPX overlap with each fund's history (so it's apples-to-apples for that fund, even though the windows differ).
+
+![Comparison vs alternatives](docs/comparison.png)
+
+| Series | Window | Total return | CAGR | Vol | Sharpe | Max DD |
+|---|---|---:|---:|---:|---:|---:|
+| **Inverse-SPX** | 1996-01-02 to 2025-12-30 | **+6,437.9%** | **+14.96%** | 21.93% | **0.75** | -58.49% |
+| S&P 500 (SPY, cap-weight) | 1996-01-02 to 2025-12-30 | +1,761.1% | +10.24% | 19.30% | 0.60 | -55.19% |
+| S&P 500 equal-weight (RSP) | 2003-05-01 to 2025-12-30 | +974.4% | +11.04% | 19.92% | 0.63 | -59.92% |
+| S&P SmallCap 600 (IJR) | 2000-05-26 to 2025-12-30 | +948.7% | +9.62% | 23.14% | 0.51 | -58.15% |
+| Russell 2000 (IWM) | 2000-05-26 to 2025-12-30 | +657.9% | +8.23% | 23.96% | 0.45 | -58.64% |
+| Avantis Small Cap Value (AVUV) | 2019-09-26 to 2025-12-30 | +127.2% | +14.00% | 28.91% | 0.60 | -49.42% |
+
+A few things stand out:
+
+1. **Inverse-SPX outperformed every alternative** on CAGR over its respective overlap window. That includes the actual small-cap indices (IJR, IWM), which is genuinely surprising — I expected the strategy to roughly track a small-cap fund.
+
+2. **Inverse-SPX is mostly a mid-cap bet, not a small-cap bet.** The smallest constituents in the S&P 500 are ~$5-10B market cap, which is mid-cap territory. The Russell 2000 and S&P SmallCap 600 own names a full order of magnitude smaller ($300M-$5B). Mid-caps as a category have historically outperformed both large- and small-caps; that explains a lot of the spread vs IJR/IWM.
+
+3. **Equal-weight (RSP) is the closest cousin** in spirit. Same universe (S&P 500), same idea (lean against mega-cap concentration), but with all 500 names at 0.2% rather than 1/MC weighting. RSP's +1.04 pp/year of CAGR vs cap-weight is the watered-down version of inverse-SPX's +4.7 pp/year.
+
+4. **AVUV** matches inverse-SPX's CAGR over its short ~6-year history — but in a small-cap-value-favorable era. Real apples-to-apples requires waiting for AVUV's track record to extend.
+
+5. **Caveats apply.** Some portion of inverse-SPX's outperformance versus the small-cap indices comes from residual data-quality issues in the 1996-2008 segment of our backtest (the $100M MC floor cleaned up most but probably not all of it). The 2008-2025 segment, where data is cleanest, still shows inverse-SPX beating IJR/IWM but by a smaller margin. As discussed in the parent README, [RVRS — the only ETF that ever ran this exact strategy](https://etfdb.com/etf/RVRS) — closed for lack of AUM, primarily due to capacity constraints in the smallest S&P 500 names.
+
+Re-run the comparison: `python tools/compare_alternatives.py`
+
 ## Why three runs?
 
 - **`out_full/`** is the primary deliverable: 30-year stitched (WRDS for 1996-2024, EDGAR for 2025).
