@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# Secrets
+.env
+
+# Caches and run artifacts
+data/cache/
+*.log
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+.claude/
+
+# Allow checked-in deliverables
+!out/
+!out_wrds/
